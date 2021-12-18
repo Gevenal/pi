@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+#
+# pi-stage0-build --- Stage 0 Tarball Builder
+#
+# This script is provided create very early stage tarball for
+# Raspiberry Pi 3 and later, aka stage 0.
+#
+# The stage 0 archive tarball include the all packages which priority
+# is required and important.  And also need to do some fackroot
+# setting for the further build.
+
+VERSION="0.1.0"
+CODENAME=""
+ARCHIVE=""
+REPOSITORY="http://ports.ubuntu.com/ubuntu-ports"
+KEYRING=""
+
+# By default, normally Bash does not care if some command failed,
+# returning a non-zero exit status code.  It just happily jumps to the
+# next one.  Make bash exit immediately when a command fails, and also
+# exit if pipe failed.
+set -Eeuo pipefail
+
+# Executed clean up behaviors when exit caused by some errors or
+# external signal.
+# trap clean SIGINT SIGTERM ERR EXIT
+
+# Often this script is operating on paths relative to the script
+# location, copying files and executing commands, assuming the script
+# directory is also a working directory. And it is, as long as we
+# execute the script from its directory.
+current_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+
+pi_stage_0_build_verbose=0
+pi_stage_0_build_package_exist="No"
+
+# Print usage of this script to STDOUT stream.
+#
+# Parameters
+# ----------
+# None
+# Returns
+# -------
+# None - It will write to STDOUT
+usage() {
+    cat << EOF
+Usage: $(basename "${BASH_SOURCE[0]}") [-hv] ARCHIVE CODENAME [REPOSITORY]
+
+create very early stage tarball for Raspiberry Pi 3 and later.
+
+Available options:
+
+    -h,--help       Show this help and exit
+    -v,--version    Show version information of this script
+       --verbose    Show verbose information
+EOF
+}
+
+# Print current version to STDOUT stream.
+#
+# Parameters
+# ----------
+# None
+# Returns
+# -------
+# None - It will write to STDOUT
+version() {
+    cat << EOF
+$(basename "${BASH_SOURCE[0]"}) v${VERSION}
+EOF
+}
+
+# Print message to STRERR with timestamp, it is used for redirect
+# different level log.  And it is meant to be used to print everything
+# that is not a script output.
+#
+# Parameters
+# ----------
+# $1: message -- text
+# $2: level   -- Option<"error", "warn", "info", "unknown">
+# $3: stream  -- Option<"stdout", "stderr">
+#
+# Returns
+# -------
+# None - It will write to STDOUT
+msg() {
+    local message=${1};
+    local level=${2-"unknown"};
+    local timestamp="$(date "+%Y-%m-%d %T.%3N")";
+    local stream=${3-"stdout"}
+
+    # Colors are disabled anyway if the stderr output is not an
+    # interactive terminal or one of the standard parameters is passed.
+    if [[ -t 2 ]] && [[ -z "${NO_COLOR-}" ]] && \
+           [[ "${TERM-}" != "dumb" ]]; then
+        local reset='\033[0m';
+        local red='\033[0;31m';
+        local green='\033[0;32m';
+        local orange='\033[0;33m';
+        local blue='\033[0;34m';
+        local purple='\033[0;35m';
+        local cyan='\033[0;36m';
+        local yellow='\033[1;33m';
+    else
+        local reset='';
+        local red='';
+        local green='';
+        local orange='';
+        local blue='';
+        local purple='';
+        local cyan='';
+        local yellow='';
+    fi
+    
+    if [[ ${pi_stage_0_build_verbose} -gt 0 ]]; then
+        if [[ "x${level}" == "xwarn" ]]; then
+            message="${timestamp} ${orange}warn${reset}  | ${message}";
+        elif [[ "x${level}" == "xerror" ]]; then
+            message="${timestamp} ${red}error${reset} | ${message}";
+        elif [[ "x${level}" == "xinfo" ]]; then
+            message="${timestamp} info  | ${message}";
+        else
+            message="${timestamp}       | ${message}";
+        fi
+    fi
+
+    if [[ "x${stream}" == "xstderr" ]] || \
+           [[ "x${level}" == "xerror" ]]; then
+        # Sent it to STDERR stream.
+        echo >&2 -e "${message}";
+    else
+        echo -e "${message}";
+    fi
+}
+
+# Exit with non-zero code, and print error message.
+#
+# Parameters
+# ----------
+# $1: message
+# $2: code    -- it should greater than 0.
+#
+# Returns
+# -------
+# Write message to STDERR and terminate this script.
+die() {
+    local message=$1
+    local code=${2-1}
+    msg "${message}" "error" "stderr"
+    exit "${code}"
+}
+
+# Parse the params and arguments of this script.
+#
+# Parameters
+# ----------
+# $@: params -- inherit from params of script.
+#
+# Returns
+# -------
+# None
+parse() {
+    while :; do
+        case "${1-}" in
+            --debug )
+                set -x ;;
+            -h | --help )
+                usage ;;
+            -v | --version )
+                version ;;
+            --verbose )
+                pi_stage_0_build_verbose=1 ;;
+            -?* )
+                die "unknown option '${1}'" ;;
+            *)
+                break ;;
+        esac
+        shift
+    done
+
+    args=("$@")
+
+    [[ ${#args[@]} -eq 0 ]] && die "missing script arguments ARCHIVE"
+    [[ ${#args[@]} -eq 1 ]] && die "missing script arguments CODENAME"
+
+    ARCHIVE=${args[0]}
+    CODENAME=${args[1]}
+    REPOSITORY=${args[2]:-${REPOSITORY}}
+}
+
+# Check a executable application is current PATH or not.
+#
+# Parameters
+# ----------
+# $1: name   -- package name
+# $2: status -- package exist register
+#
+# Returns
+# -------
+# boolean -- Write error message if PackageName is not existed.
+pi_stage_0_build_check_package() {
+    if [ $(command -v $1) ]; then
+        pi_stage_0_build_package_exist="Yes"
+    else
+        msg "$1 is not in current PATH" "error";
+        pi_stage_0_build_package_exist="No"
+    fi
+}
+
+# Perform some prepare work for genreate rootfs(stage 0).
+#
+# It will check current permission and installed status of some
+# packages in current system.
+#
+# Parameters
+# ----------
+# None
+#
+# Returns
+# -------
+# None
+pi_stage_0_build_prelude() {
+    local pi_stage_0_build_host_arch="$(uname -m)"
+    local pi_stage_0_build_qemu_support="Yes"
+    
+    if [ `id -u` -ne 0 ]; then
+        die "Permission denied, you must be root to run this script!";
+    fi
+
+    if [ -d ${ARCHIVE} ]; then
+        msg "archive directory is existed" "warn";
+    fi
+
+    # Throw error if debootstrap is not installed.
+    pi_stage_0_build_package_exist="No";
+    pi_stage_0_build_check_package "debootstrap";
+    if [[ "x${pi_stage_0_build_package_exist}" ==  "xNo" ]]; then
+        die "you need make sure debootstrap is installed";
+    fi
+
+    # Throw error if qemu-user-static is not installed when host
+    # architecture is not ARM, such as armv7, armv8.
+    if [[ ${pi_stage_0_build_host_arch} == "arm"* ]]; then
+        pi_stage_0_build_qemu_support="No"
+    fi
+    
+    if [[ "x${pi_stage_0_build_qemu_support}" == "xYes" ]]; then
+        pi_stage_0_build_package_exist="No";
+        pi_stage_0_build_check_package "qemu-aarch64-static";
+        if [[ "x${pi_stage_0_build_package_exist}" ==  "xNo" ]]; then
+            die "you need make sure qemu-user-static is installed";
+        fi
+    fi
+}
+
+# Build the stage 0 filesystem.
+#
+# Parameters
+# ----------
+# None
+#
+# Returns
+# -------
+# None
+pi_stage_0_build_ludere() {
+    local debootstrap_params=(
+        --include=ca-certificates,curl
+        --foreign
+        --arch=arm64
+    )
+    if [[ ${pi_stage_0_build_verbose} -gt 0 ]]; then
+        debootstrap_params+=('--verbose')
+    fi
+    msg "start build stage 0 (debootstrap)" "info"
+    debootstrap "${debootstrap_params[@]}" $CODENAME $ARCHIVE $REPOSITORY
+}
+
+# Remove temporary files during created by this script.
+#
+# Parameters
+# ----------
+# None
+#
+# Returns
+# -------
+# None -- but with some side effects
+clean() {
+    # TODO
+    # pi_stage_0_build_verbose=1
+    msg "clean done!"
+}
+
+parse "$@";
+pi_stage_0_build_prelude;
+pi_stage_0_build_ludere;
+
+# Local Variables:
+# mode: sh
+# sh-shell: bash
+# End:
